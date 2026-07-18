@@ -200,6 +200,13 @@ if (USE_SSE) {
   const app = express();
   app.use(express.json());
 
+  // Express server mein CORS + no-auth headers
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  next();
+});
+
   app.get("/", (_req, res) => {
     res.json({ status: "✅ Kraviona MCP Server running", transport: "sse" });
   });
