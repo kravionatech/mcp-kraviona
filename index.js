@@ -14,7 +14,7 @@ const BASE_URL = process.env.KRAVIONA_API_URL || "https://api.kraviona.com/api/v
 const EMAIL = process.env.KRAVIONA_EMAIL;
 const PASSWORD = process.env.KRAVIONA_PASSWORD;
 const PORT = Number(process.env.PORT || 3000);
-const SERVER_URL = process.env.SERVER_URL || "https://mcp-kraviona.onrender.com";
+const SERVER_URL = process.env.SERVER_URL || "https://mcp-kraviona-production.up.railway.app";
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "kraviona-claude";
 const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || "kraviona-secret-2024";
 const USE_SSE = process.env.USE_SSE === "true" || Boolean(process.env.RENDER) || Boolean(process.env.RAILWAY);
@@ -209,7 +209,6 @@ if (USE_SSE) {
   const authCodes = new Map();
   const accessTokens = new Map();
 
-  // Discovery document
   app.get("/.well-known/oauth-authorization-server", (_req, res) => {
     res.json({
       issuer: SERVER_URL,
@@ -221,7 +220,6 @@ if (USE_SSE) {
     });
   });
 
-  // Dynamic client registration — Claude.ai yeh try karta hai pehle
   app.post("/oauth/register", (req, res) => {
     res.json({
       client_id: OAUTH_CLIENT_ID,
@@ -232,46 +230,33 @@ if (USE_SSE) {
     });
   });
 
-  // Authorize
   app.get("/oauth/authorize", (req, res) => {
     const { redirect_uri, state } = req.query;
     if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
-
     const code = crypto.randomBytes(16).toString("hex");
     authCodes.set(code, { redirect_uri, created: Date.now() });
     setTimeout(() => authCodes.delete(code), 10 * 60 * 1000);
-
     const redirectUrl = new URL(redirect_uri);
     redirectUrl.searchParams.set("code", code);
     if (state) redirectUrl.searchParams.set("state", state);
     res.redirect(redirectUrl.toString());
   });
 
-  // Token exchange
   app.post("/oauth/token", (req, res) => {
     const { code, grant_type, client_id } = req.body;
-
-    if (client_id && client_id !== OAUTH_CLIENT_ID) {
+    if (client_id && client_id !== OAUTH_CLIENT_ID)
       return res.status(401).json({ error: "invalid_client" });
-    }
-
-    if (grant_type !== "authorization_code") {
+    if (grant_type !== "authorization_code")
       return res.status(400).json({ error: "unsupported_grant_type" });
-    }
-
-    if (!code || !authCodes.has(code)) {
+    if (!code || !authCodes.has(code))
       return res.status(400).json({ error: "invalid_or_expired_code" });
-    }
-
     authCodes.delete(code);
     const token = crypto.randomBytes(32).toString("hex");
     accessTokens.set(token, { created: Date.now() });
     setTimeout(() => accessTokens.delete(token), 24 * 60 * 60 * 1000);
-
     res.json({ access_token: token, token_type: "bearer", expires_in: 86400 });
   });
 
-  // Userinfo
   app.get("/oauth/userinfo", (_req, res) => {
     res.json({ sub: "kraviona-admin", name: "Kraviona Admin" });
   });
@@ -284,25 +269,22 @@ if (USE_SSE) {
   const transports = {};
 
   app.get("/sse", async (req, res) => {
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders();
+    try {
+      const transport = new SSEServerTransport(`${SERVER_URL}/messages`, res);
+      const sessionId = transport.sessionId;
+      transports[sessionId] = transport;
 
-    const transport = new SSEServerTransport("/messages", res);
-    const sessionId = transport.sessionId;
-    transports[sessionId] = transport;
+      res.on("close", () => {
+        delete transports[sessionId];
+        console.log(`Session closed: ${sessionId}`);
+      });
 
-    
-
-    res.on("close", () => {
-      delete transports[sessionId];
-      console.log(`Session closed: ${sessionId}`);
-    });
-
-    const server = createServer();
-    await server.connect(transport);
-    console.log(`New SSE session: ${sessionId}`);
+      const server = createServer();
+      await server.connect(transport);
+      console.log(`New SSE session: ${sessionId}`);
+    } catch (err) {
+      console.error("SSE error:", err.message);
+    }
   });
 
   app.post("/messages", async (req, res) => {
