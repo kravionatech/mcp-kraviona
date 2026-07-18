@@ -35,7 +35,8 @@ api.interceptors.request.use((config) => {
 async function ensureLoggedIn() {
   if (authCookie) return;
   if (!EMAIL || !PASSWORD) throw new Error("KRAVIONA_EMAIL and KRAVIONA_PASSWORD must be set");
-  const res = await api.post("/login", { email: EMAIL, password: PASSWORD });
+const res = await api.post("/login", { identifier: EMAIL, password: PASSWORD });
+
   const setCookie = res.headers["set-cookie"];
   if (setCookie) {
     authCookie = setCookie.map((c) => c.split(";")[0]).join("; ");
