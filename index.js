@@ -14,6 +14,7 @@ const BASE_URL = process.env.KRAVIONA_API_URL || "https://api.kraviona.com/api/v
 const EMAIL = process.env.KRAVIONA_EMAIL;
 const PASSWORD = process.env.KRAVIONA_PASSWORD;
 const PORT = Number(process.env.PORT || 3000);
+const SERVER_URL = process.env.SERVER_URL || "https://mcp-kraviona.onrender.com";
 const USE_SSE = process.env.USE_SSE === "true" || Boolean(process.env.RENDER) || Boolean(process.env.RAILWAY);
 
 let authCookie = "";
@@ -31,9 +32,7 @@ api.interceptors.request.use((config) => {
 
 async function ensureLoggedIn() {
   if (authCookie) return;
-  if (!EMAIL || !PASSWORD) {
-    throw new Error("KRAVIONA_EMAIL and KRAVIONA_PASSWORD must be set");
-  }
+  if (!EMAIL || !PASSWORD) throw new Error("KRAVIONA_EMAIL and KRAVIONA_PASSWORD must be set");
   const res = await api.post("/login", { email: EMAIL, password: PASSWORD });
   const setCookie = res.headers["set-cookie"];
   if (setCookie) {
@@ -180,16 +179,10 @@ function createServer() {
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
-
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
       const msg = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-      return {
-        content: [{ type: "text", text: `Error: ${msg}` }],
-        isError: true,
-      };
+      return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
     }
   });
 
@@ -210,15 +203,10 @@ if (USE_SSE) {
     next();
   });
 
-  // ─── OAuth 2.0 Endpoints (Claude.ai ke liye) ────────────────────────────────
-
-  // In-memory store (Render restart pe reset hoga, production mein DB use karo)
+  // ─── OAuth ───────────────────────────────────────────────────────────────────
   const authCodes = new Map();
   const accessTokens = new Map();
 
-  const SERVER_URL = process.env.SERVER_URL || "https://mcp-kraviona.onrender.com";
-
-  // OAuth Discovery Document — Claude.ai yahi pehle check karta hai
   app.get("/.well-known/oauth-authorization-server", (_req, res) => {
     res.json({
       issuer: SERVER_URL,
@@ -230,98 +218,80 @@ if (USE_SSE) {
     });
   });
 
-  // Step 1: Claude redirect karega yahan — hum code generate karke wapas bhejte hain
   app.get("/oauth/authorize", (req, res) => {
     const { redirect_uri, state } = req.query;
-
-    if (!redirect_uri) {
-      return res.status(400).send("Missing redirect_uri");
-    }
-
+    if (!redirect_uri) return res.status(400).send("Missing redirect_uri");
     const code = crypto.randomBytes(16).toString("hex");
     authCodes.set(code, { redirect_uri, created: Date.now() });
-
-    // 10 min baad expire
     setTimeout(() => authCodes.delete(code), 10 * 60 * 1000);
-
     const redirectUrl = new URL(redirect_uri);
     redirectUrl.searchParams.set("code", code);
     if (state) redirectUrl.searchParams.set("state", state);
-
     res.redirect(redirectUrl.toString());
   });
 
-  // Step 2: Claude code exchange karega access token ke liye
   app.post("/oauth/token", (req, res) => {
     const { code, grant_type } = req.body;
-
-    if (grant_type !== "authorization_code") {
+    if (grant_type !== "authorization_code")
       return res.status(400).json({ error: "unsupported_grant_type" });
-    }
-
-    if (!code || !authCodes.has(code)) {
+    if (!code || !authCodes.has(code))
       return res.status(400).json({ error: "invalid_or_expired_code" });
-    }
-
-    authCodes.delete(code); // one-time use
-
+    authCodes.delete(code);
     const token = crypto.randomBytes(32).toString("hex");
     accessTokens.set(token, { created: Date.now() });
-
-    // 24 ghante baad expire
     setTimeout(() => accessTokens.delete(token), 24 * 60 * 60 * 1000);
-
-    res.json({
-      access_token: token,
-      token_type: "bearer",
-      expires_in: 86400,
-    });
+    res.json({ access_token: token, token_type: "bearer", expires_in: 86400 });
   });
 
-  // Optional: userinfo endpoint
-  app.get("/oauth/userinfo", (req, res) => {
+  app.get("/oauth/userinfo", (_req, res) => {
     res.json({ sub: "kraviona-admin", name: "Kraviona Admin" });
   });
 
-  // ─── Health & Root ───────────────────────────────────────────────────────────
+  // ─── Health ───────────────────────────────────────────────────────────────────
+  app.get("/", (_req, res) => res.json({ status: "✅ Kraviona MCP Server running", transport: "sse" }));
+  app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
-  app.get("/", (_req, res) => {
-    res.json({ status: "✅ Kraviona MCP Server running", transport: "sse" });
-  });
-
-  app.get("/health", (_req, res) => {
-    res.json({ status: "ok" });
-  });
-
-  // ─── SSE Transport ───────────────────────────────────────────────────────────
-
+  // ─── SSE ─────────────────────────────────────────────────────────────────────
   const transports = {};
 
-  app.get("/sse", async (_req, res) => {
-const transport = new SSEServerTransport(`${SERVER_URL}/messages`, res);
-    transports[transport.sessionId] = transport;
+  app.get("/sse", async (req, res) => {
+    // SSE headers manually set
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    // Transport create karo (relative path — SDK internally use karta hai)
+    const transport = new SSEServerTransport("/messages", res);
+    const sessionId = transport.sessionId;
+    transports[sessionId] = transport;
+
+    // Absolute URL ke saath endpoint event manually override
+    res.write(`event: endpoint\ndata: ${SERVER_URL}/messages?sessionId=${sessionId}\n\n`);
+
     res.on("close", () => {
-      delete transports[transport.sessionId];
+      delete transports[sessionId];
+      console.log(`Session closed: ${sessionId}`);
     });
+
     const server = createServer();
     await server.connect(transport);
+    console.log(`New SSE session: ${sessionId}`);
   });
 
   app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId;
     const transport = transports[sessionId];
     if (!transport) {
-      res.status(400).json({ error: "No transport found for sessionId" });
-      return;
+      return res.status(400).json({ error: "No transport found for sessionId" });
     }
     await transport.handlePostMessage(req, res);
   });
 
   app.listen(PORT, () => {
     console.log(`✅ Kraviona MCP SSE Server running on port ${PORT}`);
-    console.log(`🔗 SSE endpoint: http://localhost:${PORT}/sse`);
-    console.log(`🔐 OAuth authorize: http://localhost:${PORT}/oauth/authorize`);
-    console.log(`🔐 OAuth token: http://localhost:${PORT}/oauth/token`);
+    console.log(`🔗 SSE: ${SERVER_URL}/sse`);
+    console.log(`🔐 OAuth: ${SERVER_URL}/oauth/authorize`);
   });
 } else {
   const server = createServer();
