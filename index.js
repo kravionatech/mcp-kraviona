@@ -113,12 +113,12 @@ const TOOLS = [
   },
   {
     name: "update_post",
-    description: "Update an existing blog post by its slug — change title, content, status, SEO fields, category, image, etc.",
+    description: "Update an existing blog post by its ID — change title, content, status, SEO fields, category, image, etc.",
     inputSchema: {
       type: "object",
       required: ["slug"],
       properties: {
-        slug:                { type: "string",  description: "Slug of the post to update" },
+        slug:                { type: "string",  description: "ID or slug of the post to update" },
         title:               { type: "string" },
         content:             { type: "string" },
         excerpt:             { type: "string" },
@@ -154,7 +154,7 @@ const TOOLS = [
       type: "object",
       required: ["slug"],
       properties: {
-        slug: { type: "string", description: "Slug of the draft post to publish" },
+        slug: { type: "string", description: "ID or slug of the draft post to publish" },
       },
     },
   },
@@ -165,7 +165,7 @@ const TOOLS = [
       type: "object",
       required: ["slug"],
       properties: {
-        slug: { type: "string", description: "Slug of the post to unpublish" },
+        slug: { type: "string", description: "ID or slug of the post to unpublish" },
       },
     },
   },
@@ -522,17 +522,17 @@ async function handleTool(name, args = {}) {
     case "update_post": {
       const { slug, ...rest } = args;
       const payload = buildPostPayload(rest);
-      return await apiCall("PUT", `/post/${slug}`, payload);
+      return await apiCall("PATCH", `/post/${slug}`, payload);   // ✅ PATCH + /post/:id
     }
 
     case "delete_post":
       return await apiCall("DELETE", `/post/${args.slug}`);
 
     case "publish_post":
-      return await apiCall("PUT", `/post/${args.slug}`, { status: "published" });
+      return await apiCall("PATCH", `/post/${args.slug}`, { status: "published" });  // ✅ PATCH
 
     case "unpublish_post":
-      return await apiCall("PUT", `/post/${args.slug}`, { status: "draft" });
+      return await apiCall("PATCH", `/post/${args.slug}`, { status: "draft" });      // ✅ PATCH
 
     // Categories
     case "get_categories":
@@ -542,14 +542,14 @@ async function handleTool(name, args = {}) {
       const { imageUrl, ...rest } = args;
       const payload = { ...rest };
       if (imageUrl) payload.image = imageUrl;
-      return await apiCall("POST", "/category/create", payload);
+      return await apiCall("POST", "/create-category", payload);
     }
 
     case "update_category": {
       const { slug, imageUrl, ...rest } = args;
       const payload = { ...rest };
       if (imageUrl) payload.image = imageUrl;
-      return await apiCall("PUT", `/category/${slug}`, payload);
+      return await apiCall("PUT", `/category/${slug}`, payload);  // PUT is correct per routes
     }
 
     case "delete_category":
@@ -560,33 +560,33 @@ async function handleTool(name, args = {}) {
       return await apiCall("GET", "/comments", null, args);
 
     case "update_comment_status":
-      return await apiCall("PUT", `/comment/${args.commentId}`, { status: args.status });
+      return await apiCall("PATCH", `/comments/${args.commentId}`, { status: args.status });  // ✅ PATCH + plural
 
     case "delete_comment":
-      return await apiCall("DELETE", `/comment/${args.commentId}`);
+      return await apiCall("DELETE", `/comments/${args.commentId}`);  // ✅ plural
 
     // Leads
     case "get_leads":
       return await apiCall("GET", "/leads", null, args);
 
     case "get_single_lead":
-      return await apiCall("GET", `/lead/${args.leadId}`);
+      return await apiCall("GET", `/leads/${args.leadId}`);  // ✅ plural
 
     case "update_lead_status":
-      return await apiCall("PUT", `/lead/${args.leadId}`, { status: args.status, notes: args.notes });
+      return await apiCall("PATCH", `/leads/${args.leadId}`, { status: args.status, notes: args.notes });  // ✅ PATCH + plural
 
     case "delete_lead":
-      return await apiCall("DELETE", `/lead/${args.leadId}`);
+      return await apiCall("DELETE", `/leads/${args.leadId}`);  // ✅ plural
 
     // Messages
     case "get_messages":
       return await apiCall("GET", "/messages", null, args);
 
     case "update_message_status":
-      return await apiCall("PUT", `/message/${args.messageId}`, { status: args.status });
+      return await apiCall("PATCH", `/messages/${args.messageId}`, { status: args.status });  // ✅ PATCH + plural
 
     case "delete_message":
-      return await apiCall("DELETE", `/message/${args.messageId}`);
+      return await apiCall("DELETE", `/messages/${args.messageId}`);  // ✅ plural
 
     // Team
     case "get_team":
@@ -599,7 +599,7 @@ async function handleTool(name, args = {}) {
       if (linkedinUrl) payload.linkedin  = linkedinUrl;
       if (twitterUrl)  payload.twitter   = twitterUrl;
       if (githubUrl)   payload.github    = githubUrl;
-      return await apiCall("POST", "/team/add", payload);
+      return await apiCall("POST", "/team", payload);  // ✅ /team not /team/add
     }
 
     case "update_team_member": {
@@ -609,7 +609,7 @@ async function handleTool(name, args = {}) {
       if (linkedinUrl) payload.linkedin  = linkedinUrl;
       if (twitterUrl)  payload.twitter   = twitterUrl;
       if (githubUrl)   payload.github    = githubUrl;
-      return await apiCall("PUT", `/team/${memberId}`, payload);
+      return await apiCall("PATCH", `/team/${memberId}`, payload);  // ✅ PATCH
     }
 
     case "delete_team_member":
@@ -621,11 +621,11 @@ async function handleTool(name, args = {}) {
 
     case "update_user": {
       const { userId, ...payload } = args;
-      return await apiCall("PUT", `/user/${userId}`, payload);
+      return await apiCall("PATCH", `/users/${userId}`, payload);  // ✅ PATCH + plural
     }
 
     case "delete_user":
-      return await apiCall("DELETE", `/user/${args.userId}`);
+      return await apiCall("DELETE", `/users/${args.userId}`);  // ✅ plural
 
     // Site Settings
     case "get_site_settings":
@@ -642,7 +642,7 @@ async function handleTool(name, args = {}) {
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 function createServer() {
   const server = new Server(
-    { name: "kraviona-admin", version: "3.0.0" },
+    { name: "kraviona-admin", version: "3.1.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -732,7 +732,7 @@ if (USE_SSE) {
     res.json({ sub: "kraviona-admin", name: "Kraviona Admin" })
   );
 
-  app.get("/",       (_req, res) => res.json({ status: "Kraviona MCP Server running", version: "3.0.0", transport: "streamable-http", tools: TOOLS.length }));
+  app.get("/",       (_req, res) => res.json({ status: "Kraviona MCP Server running", version: "3.1.0", transport: "streamable-http", tools: TOOLS.length }));
   app.get("/health", (_req, res) => res.json({ status: "ok", tools: TOOLS.length }));
 
   // MCP Streamable HTTP
@@ -794,7 +794,7 @@ if (USE_SSE) {
   });
 
   app.listen(PORT, () => {
-    console.log(`✅ Kraviona MCP v3.0.0 — ${TOOLS.length} tools — port ${PORT}`);
+    console.log(`✅ Kraviona MCP v3.1.0 — ${TOOLS.length} tools — port ${PORT}`);
     console.log(`   MCP endpoint: ${SERVER_URL}/mcp`);
   });
 
@@ -802,5 +802,5 @@ if (USE_SSE) {
   const server   = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`✅ Kraviona MCP stdio v3.0.0 — ${TOOLS.length} tools`);
+  console.error(`✅ Kraviona MCP stdio v3.1.0 — ${TOOLS.length} tools`);
 }
