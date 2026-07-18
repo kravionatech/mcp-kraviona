@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import axios from "axios";
 import express from "express";
+import crypto from "crypto";
 
 const BASE_URL = process.env.KRAVIONA_API_URL || "https://api.kraviona.com/api/v1";
 const EMAIL = process.env.KRAVIONA_EMAIL;
@@ -33,7 +34,6 @@ async function ensureLoggedIn() {
   if (!EMAIL || !PASSWORD) {
     throw new Error("KRAVIONA_EMAIL and KRAVIONA_PASSWORD must be set");
   }
-
   const res = await api.post("/login", { email: EMAIL, password: PASSWORD });
   const setCookie = res.headers["set-cookie"];
   if (setCookie) {
@@ -199,13 +199,77 @@ function createServer() {
 if (USE_SSE) {
   const app = express();
   app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
 
-  // Express server mein CORS + no-auth headers
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-  next();
-});
+  // CORS
+  app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    if (req.method === "OPTIONS") return res.sendStatus(200);
+    next();
+  });
+
+  // ─── OAuth 2.0 Endpoints (Claude.ai ke liye) ────────────────────────────────
+
+  // In-memory store (Render restart pe reset hoga, production mein DB use karo)
+  const authCodes = new Map();
+  const accessTokens = new Map();
+
+  // Step 1: Claude redirect karega yahan — hum code generate karke wapas bhejte hain
+  app.get("/oauth/authorize", (req, res) => {
+    const { redirect_uri, state } = req.query;
+
+    if (!redirect_uri) {
+      return res.status(400).send("Missing redirect_uri");
+    }
+
+    const code = crypto.randomBytes(16).toString("hex");
+    authCodes.set(code, { redirect_uri, created: Date.now() });
+
+    // 10 min baad expire
+    setTimeout(() => authCodes.delete(code), 10 * 60 * 1000);
+
+    const redirectUrl = new URL(redirect_uri);
+    redirectUrl.searchParams.set("code", code);
+    if (state) redirectUrl.searchParams.set("state", state);
+
+    res.redirect(redirectUrl.toString());
+  });
+
+  // Step 2: Claude code exchange karega access token ke liye
+  app.post("/oauth/token", (req, res) => {
+    const { code, grant_type } = req.body;
+
+    if (grant_type !== "authorization_code") {
+      return res.status(400).json({ error: "unsupported_grant_type" });
+    }
+
+    if (!code || !authCodes.has(code)) {
+      return res.status(400).json({ error: "invalid_or_expired_code" });
+    }
+
+    authCodes.delete(code); // one-time use
+
+    const token = crypto.randomBytes(32).toString("hex");
+    accessTokens.set(token, { created: Date.now() });
+
+    // 24 ghante baad expire
+    setTimeout(() => accessTokens.delete(token), 24 * 60 * 60 * 1000);
+
+    res.json({
+      access_token: token,
+      token_type: "bearer",
+      expires_in: 86400,
+    });
+  });
+
+  // Optional: userinfo endpoint
+  app.get("/oauth/userinfo", (req, res) => {
+    res.json({ sub: "kraviona-admin", name: "Kraviona Admin" });
+  });
+
+  // ─── Health & Root ───────────────────────────────────────────────────────────
 
   app.get("/", (_req, res) => {
     res.json({ status: "✅ Kraviona MCP Server running", transport: "sse" });
@@ -215,6 +279,8 @@ app.use((req, res, next) => {
     res.json({ status: "ok" });
   });
 
+  // ─── SSE Transport ───────────────────────────────────────────────────────────
+
   const transports = {};
 
   app.get("/sse", async (_req, res) => {
@@ -223,7 +289,6 @@ app.use((req, res, next) => {
     res.on("close", () => {
       delete transports[transport.sessionId];
     });
-
     const server = createServer();
     await server.connect(transport);
   });
@@ -231,18 +296,18 @@ app.use((req, res, next) => {
   app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId;
     const transport = transports[sessionId];
-
     if (!transport) {
       res.status(400).json({ error: "No transport found for sessionId" });
       return;
     }
-
     await transport.handlePostMessage(req, res);
   });
 
   app.listen(PORT, () => {
     console.log(`✅ Kraviona MCP SSE Server running on port ${PORT}`);
     console.log(`🔗 SSE endpoint: http://localhost:${PORT}/sse`);
+    console.log(`🔐 OAuth authorize: http://localhost:${PORT}/oauth/authorize`);
+    console.log(`🔐 OAuth token: http://localhost:${PORT}/oauth/token`);
   });
 } else {
   const server = createServer();
