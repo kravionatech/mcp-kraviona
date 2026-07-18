@@ -1,0 +1,22 @@
+# Environment variables - KABHI PUSH MAT KARNA
+.env
+.env.local
+.env.production
+
+# Dependencies
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# ZIP files
+*.zip
+
+# Claude Desktop config (has passwords)
+claude_desktop_config.json
