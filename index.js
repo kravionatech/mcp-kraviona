@@ -216,6 +216,20 @@ if (USE_SSE) {
   const authCodes = new Map();
   const accessTokens = new Map();
 
+  const SERVER_URL = process.env.SERVER_URL || "https://mcp-kraviona.onrender.com";
+
+  // OAuth Discovery Document — Claude.ai yahi pehle check karta hai
+  app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+    res.json({
+      issuer: SERVER_URL,
+      authorization_endpoint: `${SERVER_URL}/oauth/authorize`,
+      token_endpoint: `${SERVER_URL}/oauth/token`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code"],
+      code_challenge_methods_supported: ["S256", "plain"],
+    });
+  });
+
   // Step 1: Claude redirect karega yahan — hum code generate karke wapas bhejte hain
   app.get("/oauth/authorize", (req, res) => {
     const { redirect_uri, state } = req.query;
