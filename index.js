@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
@@ -17,7 +17,7 @@ const PORT = Number(process.env.PORT || 3000);
 const SERVER_URL = process.env.SERVER_URL || "https://mcp-kraviona-production.up.railway.app";
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "kraviona-claude";
 const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || "kraviona-secret-2024";
-const USE_SSE = process.env.USE_SSE === "true" || Boolean(process.env.RENDER) || Boolean(process.env.RAILWAY);
+const USE_SSE = process.env.USE_SSE === "true" || Boolean(process.env.RENDER) || Boolean(process.env.RAILWAY_ENVIRONMENT);
 
 let authCookie = "";
 
@@ -196,11 +196,11 @@ if (USE_SSE) {
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
-  // CORS
+  // ─── CORS ────────────────────────────────────────────────────────────────────
   app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     if (req.method === "OPTIONS") return res.sendStatus(200);
     next();
   });
@@ -261,47 +261,98 @@ if (USE_SSE) {
     res.json({ sub: "kraviona-admin", name: "Kraviona Admin" });
   });
 
-  // ─── Health ───────────────────────────────────────────────────────────────────
-  app.get("/", (_req, res) => res.json({ status: "✅ Kraviona MCP Server running", transport: "sse" }));
+  // ─── Health ──────────────────────────────────────────────────────────────────
+  app.get("/", (_req, res) =>
+    res.json({ status: "✅ Kraviona MCP Server running", transport: "streamable-http" })
+  );
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
-  // ─── SSE ─────────────────────────────────────────────────────────────────────
-  const transports = {};
+  // ─── MCP Streamable HTTP (single endpoint, replaces /sse + /messages) ────────
+  // Per-session transport map for stateful connections
+  const transports = new Map();
 
-  app.get("/sse", async (req, res) => {
+  app.post("/mcp", async (req, res) => {
     try {
-      const transport = new SSEServerTransport(`${SERVER_URL}/messages`, res);
-      const sessionId = transport.sessionId;
-      transports[sessionId] = transport;
+      // Check for existing session
+      const sessionId = req.headers["mcp-session-id"];
 
-      res.on("close", () => {
-        delete transports[sessionId];
-        console.log(`Session closed: ${sessionId}`);
-      });
+      let transport;
+      if (sessionId && transports.has(sessionId)) {
+        // Reuse existing transport for this session
+        transport = transports.get(sessionId);
+      } else {
+        // New session — create fresh server + transport
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => crypto.randomUUID(),
+          onsessioninitialized: (id) => {
+            transports.set(id, transport);
+            console.log(`New MCP session: ${id}`);
+          },
+        });
 
-      const server = createServer();
-      await server.connect(transport);
-      console.log(`New SSE session: ${sessionId}`);
+        transport.onclose = () => {
+          if (transport.sessionId) {
+            transports.delete(transport.sessionId);
+            console.log(`Session closed: ${transport.sessionId}`);
+          }
+        };
+
+        const server = createServer();
+        await server.connect(transport);
+      }
+
+      await transport.handleRequest(req, res, req.body);
     } catch (err) {
-      console.error("SSE error:", err.message);
+      console.error("MCP /mcp POST error:", err.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Internal server error" });
+      }
     }
   });
 
-  app.post("/messages", async (req, res) => {
-    const sessionId = req.query.sessionId;
-    const transport = transports[sessionId];
-    if (!transport) {
-      return res.status(400).json({ error: "No transport found for sessionId" });
+  // GET /mcp — for SSE streaming responses (client polling)
+  app.get("/mcp", async (req, res) => {
+    try {
+      const sessionId = req.headers["mcp-session-id"];
+      if (!sessionId || !transports.has(sessionId)) {
+        return res.status(400).json({ error: "Invalid or missing MCP-Session-Id" });
+      }
+      const transport = transports.get(sessionId);
+      await transport.handleRequest(req, res);
+    } catch (err) {
+      console.error("MCP /mcp GET error:", err.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Internal server error" });
+      }
     }
-    await transport.handlePostMessage(req, res);
+  });
+
+  // DELETE /mcp — client-initiated session termination
+  app.delete("/mcp", async (req, res) => {
+    try {
+      const sessionId = req.headers["mcp-session-id"];
+      if (!sessionId || !transports.has(sessionId)) {
+        return res.status(400).json({ error: "Invalid or missing MCP-Session-Id" });
+      }
+      const transport = transports.get(sessionId);
+      await transport.handleRequest(req, res);
+      transports.delete(sessionId);
+      console.log(`Session deleted: ${sessionId}`);
+    } catch (err) {
+      console.error("MCP /mcp DELETE error:", err.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Internal server error" });
+      }
+    }
   });
 
   app.listen(PORT, () => {
-    console.log(`✅ Kraviona MCP SSE Server running on port ${PORT}`);
-    console.log(`🔗 SSE: ${SERVER_URL}/sse`);
+    console.log(`✅ Kraviona MCP Streamable HTTP Server running on port ${PORT}`);
+    console.log(`🔗 MCP endpoint: ${SERVER_URL}/mcp`);
     console.log(`🔐 OAuth: ${SERVER_URL}/oauth/authorize`);
   });
 } else {
+  // stdio mode (local / Claude Desktop)
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
