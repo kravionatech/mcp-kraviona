@@ -298,7 +298,7 @@ if (USE_SSE) {
   const transports = {};
 
   app.get("/sse", async (_req, res) => {
-    const transport = new SSEServerTransport("/messages", res);
+const transport = new SSEServerTransport(`${SERVER_URL}/messages`, res);
     transports[transport.sessionId] = transport;
     res.on("close", () => {
       delete transports[transport.sessionId];
