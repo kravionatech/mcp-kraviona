@@ -293,8 +293,7 @@ if (USE_SSE) {
     const sessionId = transport.sessionId;
     transports[sessionId] = transport;
 
-    // Absolute URL override
-    res.write(`event: endpoint\ndata: ${SERVER_URL}/messages?sessionId=${sessionId}\n\n`);
+    
 
     res.on("close", () => {
       delete transports[sessionId];
