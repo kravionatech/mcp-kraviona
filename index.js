@@ -17,32 +17,48 @@ const PORT = Number(process.env.PORT || 3000);
 const SERVER_URL = process.env.SERVER_URL || "https://mcp-kraviona-production.up.railway.app";
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "kraviona-claude";
 const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET || "kraviona-secret-2024";
-const USE_SSE = process.env.USE_SSE === "true" || Boolean(process.env.RENDER) || Boolean(process.env.RAILWAY_ENVIRONMENT);
+const USE_SSE =
+  process.env.USE_SSE === "true" ||
+  Boolean(process.env.RENDER) ||
+  Boolean(process.env.RAILWAY_ENVIRONMENT);
 
-let authCookie = "";
+// ─── Auth (Bearer token) ─────────────────────────────────────────────────────
+let accessToken = "";
+let tokenExpiry = 0;
 
 const api = axios.create({
   baseURL: BASE_URL,
-  withCredentials: true,
   headers: { "Content-Type": "application/json" },
 });
 
 api.interceptors.request.use((config) => {
-  if (authCookie) config.headers["Cookie"] = authCookie;
+  if (accessToken) {
+    config.headers["Authorization"] = `Bearer ${accessToken}`;
+  }
   return config;
 });
 
 async function ensureLoggedIn() {
-  if (authCookie) return;
-  if (!EMAIL || !PASSWORD) throw new Error("KRAVIONA_EMAIL and KRAVIONA_PASSWORD must be set");
-const res = await api.post("/login", { identifier: EMAIL, password: PASSWORD });
+  if (accessToken && Date.now() < tokenExpiry - 5 * 60 * 1000) return;
 
-  const setCookie = res.headers["set-cookie"];
-  if (setCookie) {
-    authCookie = setCookie.map((c) => c.split(";")[0]).join("; ");
-  } else {
-    throw new Error("Login failed — no cookie received");
+  if (!EMAIL || !PASSWORD) {
+    throw new Error("KRAVIONA_EMAIL and KRAVIONA_PASSWORD must be set");
   }
+
+  console.log("Logging in to Kraviona API...");
+
+  const res = await axios.post(`${BASE_URL}/mcp-login`, {
+    identifier: EMAIL,
+    password: PASSWORD,
+  });
+
+  if (!res.data?.accessToken) {
+    throw new Error(`MCP login failed: ${JSON.stringify(res.data)}`);
+  }
+
+  accessToken = res.data.accessToken;
+  tokenExpiry = Date.now() + 23 * 60 * 60 * 1000;
+  console.log("Kraviona API login successful");
 }
 
 async function apiCall(method, endpoint, data = null, params = null) {
@@ -51,9 +67,10 @@ async function apiCall(method, endpoint, data = null, params = null) {
   return res.data;
 }
 
+// ─── MCP Server ──────────────────────────────────────────────────────────────
 function createServer() {
   const server = new Server(
-    { name: "kraviona-admin", version: "1.0.0" },
+    { name: "kraviona-admin", version: "2.0.0" },
     { capabilities: { tools: {} } }
   );
 
@@ -66,7 +83,7 @@ function createServer() {
       },
       {
         name: "get_posts",
-        description: "Get all blog posts",
+        description: "Get all blog posts (private)",
         inputSchema: {
           type: "object",
           properties: {
@@ -101,7 +118,7 @@ function createServer() {
       },
       {
         name: "get_leads",
-        description: "Get leads",
+        description: "Get all leads",
         inputSchema: {
           type: "object",
           properties: {
@@ -123,12 +140,12 @@ function createServer() {
       },
       {
         name: "get_categories",
-        description: "Get blog categories",
+        description: "Get all blog categories",
         inputSchema: { type: "object", properties: {} },
       },
       {
         name: "get_comments",
-        description: "Get comments",
+        description: "Get all comments",
         inputSchema: { type: "object", properties: {} },
       },
       {
@@ -182,22 +199,29 @@ function createServer() {
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
     } catch (err) {
-      const msg = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-      return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
+      const msg = err.response?.data
+        ? JSON.stringify(err.response.data)
+        : err.message;
+      return {
+        content: [{ type: "text", text: `Error: ${msg}` }],
+        isError: true,
+      };
     }
   });
 
   return server;
 }
 
+// ─── HTTP Server ──────────────────────────────────────────────────────────────
 if (USE_SSE) {
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
-  // ─── CORS ────────────────────────────────────────────────────────────────────
   app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "*");
@@ -206,7 +230,7 @@ if (USE_SSE) {
     next();
   });
 
-  // ─── OAuth ───────────────────────────────────────────────────────────────────
+  // ─── OAuth ─────────────────────────────────────────────────────────────────
   const authCodes = new Map();
   const accessTokens = new Map();
 
@@ -262,27 +286,22 @@ if (USE_SSE) {
     res.json({ sub: "kraviona-admin", name: "Kraviona Admin" });
   });
 
-  // ─── Health ──────────────────────────────────────────────────────────────────
   app.get("/", (_req, res) =>
-    res.json({ status: "✅ Kraviona MCP Server running", transport: "streamable-http" })
+    res.json({ status: "Kraviona MCP Server running", transport: "streamable-http", version: "2.0.0" })
   );
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
-  // ─── MCP Streamable HTTP (single endpoint, replaces /sse + /messages) ────────
-  // Per-session transport map for stateful connections
+  // ─── MCP Streamable HTTP ───────────────────────────────────────────────────
   const transports = new Map();
 
   app.post("/mcp", async (req, res) => {
     try {
-      // Check for existing session
       const sessionId = req.headers["mcp-session-id"];
-
       let transport;
+
       if (sessionId && transports.has(sessionId)) {
-        // Reuse existing transport for this session
         transport = transports.get(sessionId);
       } else {
-        // New session — create fresh server + transport
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => crypto.randomUUID(),
           onsessioninitialized: (id) => {
@@ -302,16 +321,13 @@ if (USE_SSE) {
         await server.connect(transport);
       }
 
-      await transport.handleRequest(req, res, req.body);
+      await transport.handleRequest(req, res, req.body || {});
     } catch (err) {
-      console.error("MCP /mcp POST error:", err.message);
-      if (!res.headersSent) {
-        res.status(500).json({ error: "Internal server error" });
-      }
+      console.error("MCP POST error:", err.message);
+      if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  // GET /mcp — for SSE streaming responses (client polling)
   app.get("/mcp", async (req, res) => {
     try {
       const sessionId = req.headers["mcp-session-id"];
@@ -321,14 +337,11 @@ if (USE_SSE) {
       const transport = transports.get(sessionId);
       await transport.handleRequest(req, res);
     } catch (err) {
-      console.error("MCP /mcp GET error:", err.message);
-      if (!res.headersSent) {
-        res.status(500).json({ error: "Internal server error" });
-      }
+      console.error("MCP GET error:", err.message);
+      if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  // DELETE /mcp — client-initiated session termination
   app.delete("/mcp", async (req, res) => {
     try {
       const sessionId = req.headers["mcp-session-id"];
@@ -338,24 +351,19 @@ if (USE_SSE) {
       const transport = transports.get(sessionId);
       await transport.handleRequest(req, res);
       transports.delete(sessionId);
-      console.log(`Session deleted: ${sessionId}`);
     } catch (err) {
-      console.error("MCP /mcp DELETE error:", err.message);
-      if (!res.headersSent) {
-        res.status(500).json({ error: "Internal server error" });
-      }
+      console.error("MCP DELETE error:", err.message);
+      if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
     }
   });
 
   app.listen(PORT, () => {
-    console.log(`✅ Kraviona MCP Streamable HTTP Server running on port ${PORT}`);
-    console.log(`🔗 MCP endpoint: ${SERVER_URL}/mcp`);
-    console.log(`🔐 OAuth: ${SERVER_URL}/oauth/authorize`);
+    console.log(`Kraviona MCP Streamable HTTP Server on port ${PORT}`);
+    console.log(`MCP: ${SERVER_URL}/mcp`);
   });
 } else {
-  // stdio mode (local / Claude Desktop)
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("✅ Kraviona MCP stdio Server running...");
+  console.error("Kraviona MCP stdio Server running...");
 }
